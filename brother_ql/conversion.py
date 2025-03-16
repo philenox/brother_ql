@@ -8,6 +8,11 @@ import logging
 from PIL import Image
 import PIL.ImageOps, PIL.ImageChops
 
+# In Pillow 11.x, LANCZOS is the direct replacement for ANTIALIAS
+RESAMPLING = Image.LANCZOS
+# In Pillow 11.x, Dither.FLOYDSTEINBERG is the replacement for FLOYDSTEINBERG
+DITHER = Image.Dither.FLOYDSTEINBERG
+
 from brother_ql.raster import BrotherQLRaster
 from brother_ql.devicedependent import ENDLESS_LABEL, DIE_CUT_LABEL, ROUND_DIE_CUT_LABEL, PTOUCH_ENDLESS_LABEL
 from brother_ql.devicedependent import label_type_specs, right_margin_addition
@@ -110,7 +115,7 @@ def convert(qlr, images, label,  **kwargs):
                 im = im.resize((im.size[0]//2, im.size[1]))
             if im.size[0] != dots_printable[0]:
                 hsize = int((dots_printable[0] / im.size[0]) * im.size[1])
-                im = im.resize((dots_printable[0], hsize), Image.ANTIALIAS)
+                im = im.resize((dots_printable[0], hsize), RESAMPLING)
                 logger.warning('Need to resize the image...')
             if im.size[0] < device_pixel_width:
                 new_im = Image.new(im.mode, (device_pixel_width, im.size[1]), (255,)*len(im.mode))
@@ -152,7 +157,7 @@ def convert(qlr, images, label,  **kwargs):
             im = PIL.ImageOps.invert(im)
 
             if dither:
-                im = im.convert("1", dither=Image.FLOYDSTEINBERG)
+                im = im.convert("1", dither=DITHER)
             else:
                 im = im.point(lambda x: 0 if x < threshold else 255, mode="1")
 

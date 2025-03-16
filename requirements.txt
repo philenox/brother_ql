@@ -1,0 +1,6 @@
+click
+future
+packbits
+pillow>=3.3.0
+pyusb
+attrs 

@@ -17,6 +17,7 @@ import usb.core
 import usb.util
 
 from .generic import BrotherQLBackendGeneric
+from ..usb_ids import get_model
 
 def list_available_devices():
     """
@@ -52,7 +53,15 @@ def list_available_devices():
         except:
             return 'usb://0x{:04x}:0x{:04x}'.format(dev.idVendor, dev.idProduct)
 
-    return [{'identifier': identifier(printer), 'instance': printer} for printer in printers]
+    def get_printer_info(printer):
+        info = {
+            'identifier': identifier(printer),
+            'instance': printer,
+            'model': get_model(printer.idProduct) or 'unknown'
+        }
+        return info
+
+    return [get_printer_info(printer) for printer in printers]
 
 class BrotherQLBackendPyUSB(BrotherQLBackendGeneric):
     """

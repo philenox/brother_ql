@@ -3,4 +3,6 @@ future
 packbits
 pillow>=3.3.0
 pyusb
-attrs 
+attrs
+brother-ql>=0.9.4
+Pillow>=10.0.0 

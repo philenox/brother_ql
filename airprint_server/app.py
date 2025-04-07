@@ -4,7 +4,7 @@ import os
 import sys
 import time
 import uuid
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from zeroconf import ServiceInfo, Zeroconf
 import socket
 from brother_ql.raster import BrotherQLRaster
@@ -15,6 +15,8 @@ import io
 import logging
 import usb.core
 import usb.util
+import tempfile
+from io import BytesIO
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -176,73 +178,230 @@ class AirPrintService:
 # Initialize AirPrint service
 airprint_service = AirPrintService()
 
-@app.route('/ipp/print', methods=['POST'])
-def print_job():
+@app.route('/ipp', methods=['GET', 'POST'])
+def ipp_root():
+    """Handle root IPP requests"""
+    return ipp_print()
+
+@app.route('/ipp/print', methods=['POST', 'GET'])
+def ipp_print():
+    """Handle IPP print requests"""
     try:
-        # Check USB permissions before attempting to print
-        if not check_usb_permissions():
-            return jsonify({'error': 'Cannot access printer. Check permissions.'}), 403
+        logger.info("=== START IPP REQUEST HANDLING ===")
+        logger.info(f"Request method: {request.method}")
+        logger.info(f"Request headers: {dict(request.headers)}")
         
-        # Get the print job data
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file provided'}), 400
+        # Get the raw request data
+        raw_data = request.get_data()
+        logger.info(f"Raw request data length: {len(raw_data)} bytes")
+        logger.info(f"Raw request data hex: {raw_data.hex()}")
         
-        file = request.files['file']
-        logger.info(f"Received file: {file.filename}")
+        # Check if this is an IPP request
+        content_type = request.headers.get('Content-Type')
+        logger.info(f"Content-Type: {content_type}")
         
-        # Read the image
-        try:
-            image_data = file.read()
-            logger.info(f"Read {len(image_data)} bytes from file")
-            image = Image.open(io.BytesIO(image_data))
-            logger.info(f"Opened image: {image.format}, {image.size}, {image.mode}")
-        except Exception as e:
-            logger.error(f"Error reading image: {str(e)}")
-            return jsonify({'error': f'Error reading image: {str(e)}'}), 400
+        if content_type == 'application/ipp':
+            logger.info("Processing as IPP request")
+            
+            # Parse IPP request
+            if len(raw_data) >= 8:
+                version_major = raw_data[0]
+                version_minor = raw_data[1]
+                operation = int.from_bytes(raw_data[2:4], byteorder='big')
+                request_id = int.from_bytes(raw_data[4:8], byteorder='big')
+                
+                logger.info(f"IPP Version: {version_major}.{version_minor}")
+                logger.info(f"IPP Operation ID: 0x{operation:04x}")
+                logger.info(f"IPP Request ID: {request_id}")
+                
+                # Log the rest of the request data
+                attributes_data = raw_data[8:]
+                logger.info(f"Attributes data hex: {attributes_data.hex()}")
+                
+                # Handle Get-Printer-Attributes operation (0x000B)
+                if operation == 0x000B:
+                    logger.info("Handling Get-Printer-Attributes operation")
+                    try:
+                        # Create IPP response
+                        response = BytesIO()
+                        
+                        # Write response header
+                        logger.info("Writing IPP response header")
+                        response.write(bytes([version_major, version_minor]))  # Version
+                        response.write((0).to_bytes(2, 'big'))  # Status code: successful-ok
+                        response.write(request_id.to_bytes(4, 'big'))  # Request ID
+                        
+                        # Operation attributes
+                        response.write(b'\x01')  # operation-attributes-tag
+                        
+                        # Required operation attributes
+                        def write_attribute(tag, name, value, group_tag=None):
+                            try:
+                                if group_tag:
+                                    logger.info(f"Writing group tag: 0x{group_tag:02x}")
+                                    response.write(bytes([group_tag]))
+                                
+                                logger.info(f"Writing attribute: {name} = {value} (tag: 0x{tag:02x})")
+                                response.write(bytes([tag]))  # Value tag
+                                
+                                # Name
+                                name_bytes = name.encode('utf-8')
+                                response.write(len(name_bytes).to_bytes(2, 'big'))
+                                response.write(name_bytes)
+                                
+                                # Value
+                                if isinstance(value, str):
+                                    value_bytes = value.encode('utf-8')
+                                    response.write(len(value_bytes).to_bytes(2, 'big'))
+                                    response.write(value_bytes)
+                                elif isinstance(value, int):
+                                    if tag == 0x22:  # boolean tag
+                                        response.write((1).to_bytes(2, 'big'))  # Length 1 for boolean
+                                        response.write(bytes([1 if value else 0]))
+                                        logger.info(f"Wrote boolean value: {1 if value else 0}")
+                                    else:
+                                        response.write((4).to_bytes(2, 'big'))  # Length 4 for integers
+                                        response.write(value.to_bytes(4, 'big'))
+                                elif isinstance(value, bool):
+                                    response.write((1).to_bytes(2, 'big'))  # Length 1 for boolean
+                                    response.write(bytes([1 if value else 0]))
+                                    logger.info(f"Wrote boolean value: {1 if value else 0}")
+                                    
+                                logger.info(f"Successfully wrote attribute {name}")
+                            except Exception as e:
+                                logger.error(f"Error writing attribute {name}: {str(e)}")
+                                raise
+                        
+                        # Operation attributes
+                        write_attribute(0x47, 'attributes-charset', 'utf-8')
+                        write_attribute(0x48, 'attributes-natural-language', 'en')
+                        
+                        # Printer attributes
+                        write_attribute(0x47, 'printer-uri-supported', f'ipp://192.168.178.27:631/ipp/print', 0x02)  # printer-attributes-tag
+                        write_attribute(0x42, 'printer-name', 'Brother QL-600')  # nameWithoutLanguage
+                        write_attribute(0x23, 'printer-state', 3)  # enum (idle)
+                        write_attribute(0x47, 'printer-state-reasons', 'none')
+                        write_attribute(0x42, 'printer-make-and-model', 'Brother QL-600')  # nameWithoutLanguage
+                        write_attribute(0x42, 'printer-location', '')  # nameWithoutLanguage
+                        write_attribute(0x42, 'printer-info', 'Brother QL-600 Label Printer')  # nameWithoutLanguage
+                        write_attribute(0x42, 'printer-type', 'label')  # nameWithoutLanguage
+                        write_attribute(0x22, 'printer-is-accepting-jobs', 1)  # boolean (1 = true)
+                        write_attribute(0x47, 'pdl-data-stream-format-supported', 'application/octet-stream')
+                        write_attribute(0x47, 'printer-resolution-supported', '300dpi')
+                        write_attribute(0x47, 'printer-media-supported', '62mm')
+                        write_attribute(0x22, 'printer-color-supported', 0)  # boolean (0 = false)
+                        write_attribute(0x47, 'printer-sides-supported', 'one-sided')
+                        
+                        # Add missing required attributes
+                        write_attribute(0x47, 'charset-configured', 'utf-8')
+                        write_attribute(0x47, 'charset-supported', 'utf-8')
+                        write_attribute(0x47, 'compression-supported', 'none')
+                        write_attribute(0x47, 'document-format-default', 'application/pdf')
+                        write_attribute(0x47, 'document-format-supported', 'application/pdf,image/jpeg,image/png')
+                        write_attribute(0x48, 'generated-natural-language-supported', 'en')
+                        write_attribute(0x47, 'ipp-versions-supported', '1.1')
+                        write_attribute(0x48, 'natural-language-configured', 'en')
+                        write_attribute(0x23, 'operations-supported', 0x000B)  # Get-Printer-Attributes
+                        write_attribute(0x22, 'pdl-override-supported', 0)  # boolean (0 = false)
+                        write_attribute(0x21, 'printer-up-time', int(time.time()))  # integer
+                        write_attribute(0x21, 'queued-job-count', 0)  # integer
+                        write_attribute(0x47, 'uri-authentication-supported', 'none')
+                        write_attribute(0x47, 'uri-security-supported', 'none')
+                        
+                        # End of attributes
+                        response.write(b'\x03')  # end-of-attributes-tag
+                        
+                        # Get the complete response
+                        response_data = response.getvalue()
+                        logger.info(f"Complete response length: {len(response_data)} bytes")
+                        logger.info(f"Complete response hex: {response_data.hex()}")
+                        
+                        # Send response
+                        return Response(
+                            response_data,
+                            status=200,
+                            headers={
+                                'Content-Type': 'application/ipp',
+                                'Content-Length': str(len(response_data))
+                            }
+                        )
+                    except Exception as e:
+                        logger.error(f"Error creating IPP response: {str(e)}")
+                        raise
+            else:
+                logger.error("IPP request too short")
+                return Response(status=400)
         
-        # Create printer instance
-        try:
-            qlr = BrotherQLRaster(PRINTER_MODEL)
-            qlr.exception_on_warning = True
-            logger.info(f"Created BrotherQLRaster instance for model {PRINTER_MODEL}")
-        except Exception as e:
-            logger.error(f"Error creating printer instance: {str(e)}")
-            return jsonify({'error': f'Error creating printer instance: {str(e)}'}), 500
+        logger.info("=== END IPP REQUEST HANDLING ===")
         
-        # Convert image to printer instructions
-        try:
-            instructions = convert(
-                qlr=qlr,
-                images=[image],
-                label=LABEL_SIZE,
-                rotate='auto',
-                threshold=70.0,
-                dither=False,
-                compress=True,
-                cut=True
-            )
-            logger.info(f"Converted image to printer instructions: {len(instructions)} bytes")
-        except Exception as e:
-            logger.error(f"Error converting image: {str(e)}")
-            return jsonify({'error': f'Error converting image: {str(e)}'}), 500
+        # Handle regular print job submission
+        if request.method == 'POST' and 'file' in request.files:
+            logger.info("Processing as regular print job")
+            file = request.files['file']
+            if file.filename == '':
+                logger.error("No file selected")
+                return jsonify({'error': 'No file selected'}), 400
+            
+            # Save the file temporarily
+            temp_path = os.path.join(tempfile.gettempdir(), file.filename)
+            file.save(temp_path)
+            logger.info(f"Saved file to {temp_path}")
+            
+            try:
+                # Create printer instance
+                printer = BrotherQLRaster('QL-600')
+                
+                # Convert image to printer format
+                image = Image.open(temp_path)
+                # Auto-rotate image if needed
+                if image.width > image.height:
+                    image = image.rotate(90, expand=True)
+                # Convert to RGB if needed
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
+                
+                # Convert to printer format
+                data = printer.convert(
+                    qlr=image,
+                    label='62',
+                    rotate='auto',
+                    threshold=70.0,
+                    dither=False,
+                    compress=False
+                )
+                
+                # Send to printer
+                printer.write(data)
+                logger.info("Print job completed successfully")
+                
+                # Create IPP response
+                response = BytesIO()
+                response.write(b'\x01\x01')  # Version 1.1
+                response.write(b'\x00\x0B')  # Get-Printer-Attributes operation
+                response.write(b'\x00\x00\x00\x01')  # Request ID
+                response.write(b'\x00\x00')  # Status code: successful-ok
+                response.write(b'\x03')  # End-of-attributes-tag
+                
+                return Response(
+                    response.getvalue(),
+                    status=200,
+                    headers={'Content-Type': 'application/ipp'}
+                )
+                
+            except Exception as e:
+                logger.error(f"Error processing print job: {str(e)}")
+                return jsonify({'error': str(e)}), 500
+            finally:
+                # Clean up temporary file
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
         
-        # Send to printer
-        try:
-            send(
-                instructions=instructions,
-                printer_identifier=PRINTER_IDENTIFIER,
-                backend_identifier='pyusb',
-                blocking=True
-            )
-            logger.info("Successfully sent instructions to printer")
-        except Exception as e:
-            logger.error(f"Error sending to printer: {str(e)}")
-            return jsonify({'error': f'Error sending to printer: {str(e)}'}), 500
+        return jsonify({'error': 'Invalid request method'}), 405
         
-        return jsonify({'status': 'success', 'message': 'Print job completed'})
-    
     except Exception as e:
-        logger.error(f"Error processing print job: {str(e)}")
+        logger.error(f"Error in IPP request: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/health', methods=['GET'])
@@ -268,4 +427,4 @@ if __name__ == '__main__':
         app.run(host='192.168.178.27', port=631)
     except KeyboardInterrupt:
         print("\nShutting down...")
-        airprint_service.stop() 
+        airprint_service.stop()     

@@ -301,7 +301,7 @@ def ipp_print():
                         write_attribute(0x48, 'generated-natural-language-supported', 'en')
                         write_attribute(0x47, 'ipp-versions-supported', '1.1')
                         write_attribute(0x48, 'natural-language-configured', 'en')
-                        write_attribute(0x23, 'operations-supported', 0x000B)  # Get-Printer-Attributes
+                        write_attribute(0x23, 'operations-supported', 0x0002)  # Print-Job
                         write_attribute(0x22, 'pdl-override-supported', 0)  # boolean (0 = false)
                         write_attribute(0x21, 'printer-up-time', int(time.time()))  # integer
                         write_attribute(0x21, 'queued-job-count', 0)  # integer
@@ -328,6 +328,165 @@ def ipp_print():
                     except Exception as e:
                         logger.error(f"Error creating IPP response: {str(e)}")
                         raise
+                
+                # Handle Print-Job operation (0x0002)
+                elif operation == 0x0002:
+                    logger.info("Handling Print-Job operation")
+                    try:
+                        # Parse the IPP request to find the document data
+                        # The document data is after the end-of-attributes-tag (0x03)
+                        data_start = raw_data.find(b'\x03') + 1
+                        logger.info(f"Document data start position: {data_start}")
+                        
+                        if data_start > 0:
+                            document_data = raw_data[data_start:]
+                            logger.info(f"Found document data of length: {len(document_data)} bytes")
+                            
+                            # Log the first 100 bytes of document data for debugging
+                            if len(document_data) > 0:
+                                logger.info(f"First 100 bytes of document data: {document_data[:100].hex()}")
+                            
+                            # Save the document data to a temporary file
+                            temp_path = os.path.join(tempfile.gettempdir(), f'print_job_{int(time.time())}.pdf')
+                            with open(temp_path, 'wb') as f:
+                                f.write(document_data)
+                            logger.info(f"Saved document to {temp_path}")
+                            
+                            # Process the print job
+                            try:
+                                # Create printer instance
+                                logger.info("Creating printer instance")
+                                printer = BrotherQLRaster('QL-600')
+                                
+                                # Check if test_print.png exists
+                                test_image_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_print.png')
+                                if os.path.exists(test_image_path):
+                                    logger.info(f"Test image exists at {test_image_path}")
+                                else:
+                                    logger.error(f"Test image not found at {test_image_path}")
+                                    # Create a simple test image
+                                    logger.info("Creating a simple test image")
+                                    img = Image.new('RGB', (300, 100), color=(255, 255, 255))
+                                    img.save(test_image_path)
+                                    logger.info(f"Created test image at {test_image_path}")
+                                
+                                # Convert document to printer format
+                                # For now, we'll just print a test image
+                                # In a real implementation, you would convert the PDF to an image
+                                logger.info("Opening test image")
+                                image = Image.open(test_image_path)
+                                logger.info(f"Image size: {image.width}x{image.height}, mode: {image.mode}")
+                                
+                                # Auto-rotate image if needed
+                                if image.width > image.height:
+                                    logger.info("Rotating image 90 degrees")
+                                    image = image.rotate(90, expand=True)
+                                
+                                # Convert to RGB if needed
+                                if image.mode != 'RGB':
+                                    logger.info(f"Converting image from {image.mode} to RGB")
+                                    image = image.convert('RGB')
+                                
+                                # Convert to printer format
+                                logger.info("Converting image to printer format")
+                                data = convert(
+                                    qlr=printer,
+                                    images=[image],
+                                    label='62',
+                                    rotate='auto',
+                                    threshold=70.0,
+                                    dither=False,
+                                    compress=False
+                                )
+                                logger.info(f"Converted data length: {len(data)} bytes")
+                                
+                                # Send to printer
+                                logger.info("Sending data to printer")
+                                send(data, 'usb://0x04f9:0x20c0')
+                                logger.info("Print job completed successfully")
+                                
+                                # Create IPP response
+                                logger.info("Creating IPP response")
+                                response = BytesIO()
+                                
+                                # Write response header
+                                response.write(bytes([version_major, version_minor]))  # Version
+                                response.write((0).to_bytes(2, 'big'))  # Status code: successful-ok
+                                response.write(request_id.to_bytes(4, 'big'))  # Request ID
+                                
+                                # Operation attributes
+                                response.write(b'\x01')  # operation-attributes-tag
+                                
+                                # Required operation attributes
+                                write_attribute(0x47, 'attributes-charset', 'utf-8')
+                                write_attribute(0x48, 'attributes-natural-language', 'en')
+                                
+                                # Job attributes
+                                job_id = int(time.time())
+                                write_attribute(0x21, 'job-id', job_id, 0x02)  # job-attributes-tag
+                                write_attribute(0x47, 'job-state', '3')  # pending
+                                write_attribute(0x47, 'job-state-reasons', 'none')
+                                write_attribute(0x47, 'job-uri', f'ipp://192.168.178.27:631/jobs/{job_id}')
+                                
+                                # End of attributes
+                                response.write(b'\x03')  # end-of-attributes-tag
+                                
+                                # Get the complete response
+                                response_data = response.getvalue()
+                                logger.info(f"Print-Job response length: {len(response_data)} bytes")
+                                logger.info(f"Print-Job response hex: {response_data.hex()}")
+                                
+                                # Send response
+                                return Response(
+                                    response_data,
+                                    status=200,
+                                    headers={
+                                        'Content-Type': 'application/ipp',
+                                        'Content-Length': str(len(response_data))
+                                    }
+                                )
+                            except Exception as e:
+                                logger.error(f"Error processing print job: {str(e)}")
+                                # Return error response
+                                response = BytesIO()
+                                response.write(bytes([version_major, version_minor]))  # Version
+                                response.write((0x0500).to_bytes(2, 'big'))  # Status code: server-error-internal-error
+                                response.write(request_id.to_bytes(4, 'big'))  # Request ID
+                                response.write(b'\x01')  # operation-attributes-tag
+                                
+                                # Write error response attributes
+                                response.write(bytes([0x47]))  # charset tag
+                                name = 'attributes-charset'.encode('utf-8')
+                                response.write(len(name).to_bytes(2, 'big'))
+                                response.write(name)
+                                value = 'utf-8'.encode('utf-8')
+                                response.write(len(value).to_bytes(2, 'big'))
+                                response.write(value)
+                                
+                                response.write(bytes([0x48]))  # natural-language tag
+                                name = 'attributes-natural-language'.encode('utf-8')
+                                response.write(len(name).to_bytes(2, 'big'))
+                                response.write(name)
+                                value = 'en'.encode('utf-8')
+                                response.write(len(value).to_bytes(2, 'big'))
+                                response.write(value)
+                                
+                                response.write(b'\x03')  # end-of-attributes-tag
+                                
+                                return Response(
+                                    response.getvalue(),
+                                    status=500,
+                                    headers={
+                                        'Content-Type': 'application/ipp',
+                                        'Content-Length': str(response.tell())
+                                    }
+                                )
+                        else:
+                            logger.error("No document data found in Print-Job request")
+                            return Response(status=400)
+                    except Exception as e:
+                        logger.error(f"Error handling Print-Job operation: {str(e)}")
+                        return Response(status=500)
             else:
                 logger.error("IPP request too short")
                 return Response(status=400)

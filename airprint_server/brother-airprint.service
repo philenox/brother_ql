@@ -1,0 +1,20 @@
+[Unit]
+Description=Brother QL-600 AirPrint Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/plenox/brother_ql/airprint_server
+Environment=PYTHONPATH=/home/plenox/brother_ql
+Environment=BROTHER_QL_BACKEND=pyusb
+Environment=BROTHER_QL_MODEL=QL-600
+Environment=BROTHER_QL_PRINTER=usb://0x04f9:0x20c0
+ExecStartPre=/bin/sh -c 'systemctl stop cups || true'
+ExecStart=/home/plenox/brother_ql/venv/bin/python /home/plenox/brother_ql/airprint_server/app.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target 

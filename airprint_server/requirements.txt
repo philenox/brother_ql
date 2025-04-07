@@ -1,0 +1,5 @@
+flask==3.0.2
+zeroconf==0.131.0
+Pillow==10.2.0
+brother_ql==0.9.4
+python-dotenv==1.0.1 
